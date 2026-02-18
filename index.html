@@ -1,375 +1,509 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Play, Pause, RotateCcw, Zap, Flame, Brain, MousePointer2, Cookie } from 'lucide-react';
-
-// --- Types & Constants ---
-const GRID_SIZE = 6;
-const REWARD_GOAL = 100;
-const REWARD_HAZARD = -100;
-const REWARD_STEP = -1; // Slight penalty for taking too long
-const LEARNING_RATE = 0.5;
-const DISCOUNT_FACTOR = 0.9;
-
-type Position = { x: number; y: number };
-type CellType = 'empty' | 'wall' | 'hazard' | 'goal' | 'start';
-
-// Initial Grid Layout
-const INITIAL_GRID_LAYOUT: CellType[][] = [
-  ['start', 'empty', 'empty', 'empty', 'empty', 'empty'],
-  ['empty', 'wall', 'wall', 'hazard', 'empty', 'empty'],
-  ['empty', 'empty', 'empty', 'empty', 'wall', 'empty'],
-  ['hazard', 'wall', 'empty', 'wall', 'empty', 'empty'],
-  ['empty', 'empty', 'empty', 'hazard', 'empty', 'goal'],
-  ['empty', 'empty', 'empty', 'empty', 'empty', 'empty'],
-];
-
-export default function RLGame() {
-  // --- State ---
-  const [robotPos, setRobotPos] = useState<Position>({ x: 0, y: 0 });
-  const [qValues, setQValues] = useState<number[][]>(
-    Array(GRID_SIZE).fill(0).map(() => Array(GRID_SIZE).fill(0))
-  );
-  const [isRunning, setIsRunning] = useState(false);
-  const [episode, setEpisode] = useState(0);
-  const [steps, setSteps] = useState(0);
-  const [robotMood, setRobotMood] = useState<'neutral' | 'happy' | 'dead' | 'confused' | 'eating'>('neutral');
-  const [showValues, setShowValues] = useState(true);
-  const [speed, setSpeed] = useState(200);
-  const [episodeFinished, setEpisodeFinished] = useState(false);
-
-  // Refs for loop management
-  const runningRef = useRef(false);
-  const robotPosRef = useRef<Position>({ x: 0, y: 0 });
-  
-  // --- Helpers ---
-  
-  const getCellType = (x: number, y: number): CellType => {
-    if (x < 0 || y < 0 || x >= GRID_SIZE || y >= GRID_SIZE) return 'wall';
-    return INITIAL_GRID_LAYOUT[y][x];
-  };
-
-  const getBestMove = (x: number, y: number, currentQ: number[][]) => {
-    const moves = [
-      { dx: 0, dy: -1 }, // Up
-      { dx: 0, dy: 1 },  // Down
-      { dx: -1, dy: 0 }, // Left
-      { dx: 1, dy: 0 }   // Right
-    ];
-
-    // Exploration vs Exploitation
-    // As episodes increase, explore less
-    const explorationRate = Math.max(0.1, 1.0 - (episode * 0.05)); 
-    
-    if (Math.random() < explorationRate) {
-      return moves[Math.floor(Math.random() * moves.length)];
-    } else {
-      let bestMove = moves[0];
-      let maxVal = -Infinity;
-
-      moves.forEach(move => {
-        const nx = x + move.dx;
-        const ny = y + move.dy;
-        if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE && getCellType(nx, ny) !== 'wall') {
-          if (currentQ[ny][nx] > maxVal) {
-            maxVal = currentQ[ny][nx];
-            bestMove = move;
-          }
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robo-Dash: RL Lab</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Smooth transitions for moving pieces */
+        .cell {
+            transition: background-color 0.3s ease, border-color 0.3s ease;
         }
-      });
-      return bestMove;
-    }
-  };
+        .robot-container {
+            transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        /* Custom scrollbar for webkit */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1e293b; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #475569; 
+            border-radius: 4px;
+        }
+        /* Range slider styling */
+        input[type=range] {
+            -webkit-appearance: none; 
+            background: transparent; 
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #3b82f6;
+            margin-top: -6px; 
+            cursor: pointer;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            background: #334155;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans min-h-screen flex flex-col items-center p-4 md:p-6 select-none">
 
-  const updateQValue = (prevX: number, prevY: number, newX: number, newY: number, reward: number) => {
-    setQValues(prev => {
-      const newQ = prev.map(row => [...row]);
-      
-      const currentVal = newQ[prevY][prevX];
-      const futureVal = (newX >= 0 && newX < GRID_SIZE && newY >= 0 && newY < GRID_SIZE) 
-        ? newQ[newY][newX] 
-        : 0;
-      
-      const updatedVal = currentVal + LEARNING_RATE * (reward + (DISCOUNT_FACTOR * futureVal) - currentVal);
-      
-      newQ[prevY][prevX] = parseFloat(updatedVal.toFixed(2));
-      return newQ;
-    });
-  };
-
-  const startNextEpisode = () => {
-    setRobotPos({ x: 0, y: 0 });
-    robotPosRef.current = { x: 0, y: 0 };
-    setSteps(0);
-    setEpisode(e => e + 1);
-    setRobotMood('neutral');
-    setEpisodeFinished(false);
-    setIsRunning(true);
-  };
-
-  const hardReset = () => {
-    setIsRunning(false);
-    runningRef.current = false;
-    setQValues(Array(GRID_SIZE).fill(0).map(() => Array(GRID_SIZE).fill(0)));
-    setEpisode(0);
-    setSteps(0);
-    setRobotPos({ x: 0, y: 0 });
-    robotPosRef.current = { x: 0, y: 0 };
-    setRobotMood('neutral');
-    setEpisodeFinished(false);
-  };
-
-  // --- Actions ---
-
-  const giveCookie = () => {
-    const { x, y } = robotPosRef.current;
-    
-    // Reward the current position immediately
-    setQValues(prev => {
-      const newQ = prev.map(row => [...row]);
-      newQ[y][x] += 50; // Big manual reward!
-      return newQ;
-    });
-
-    setRobotMood('eating');
-    setTimeout(() => setRobotMood('neutral'), 800);
-  };
-
-  // --- Game Loop ---
-
-  const step = () => {
-    if (!runningRef.current) return;
-
-    const currentX = robotPosRef.current.x;
-    const currentY = robotPosRef.current.y;
-    
-    const move = getBestMove(currentX, currentY, qValues);
-    const nextX = currentX + move.dx;
-    const nextY = currentY + move.dy;
-
-    let reward = REWARD_STEP;
-    let hitWall = false;
-    let isGameOver = false;
-
-    const nextCell = getCellType(nextX, nextY);
-
-    if (nextCell === 'wall') {
-      hitWall = true;
-      reward = -10;
-      setRobotMood('confused');
-    } else if (nextCell === 'hazard') {
-      reward = REWARD_HAZARD;
-      setRobotMood('dead');
-      isGameOver = true;
-    } else if (nextCell === 'goal') {
-      reward = REWARD_GOAL;
-      setRobotMood('happy');
-      isGameOver = true;
-    }
-
-    const actualNextX = hitWall ? currentX : nextX;
-    const actualNextY = hitWall ? currentY : nextY;
-
-    updateQValue(currentX, currentY, actualNextX, actualNextY, reward);
-
-    if (!hitWall) {
-      setRobotPos({ x: nextX, y: nextY });
-      robotPosRef.current = { x: nextX, y: nextY };
-    }
-
-    setSteps(s => s + 1);
-
-    if (isGameOver) {
-      setEpisodeFinished(true);
-      setIsRunning(false);
-      runningRef.current = false;
-    } else {
-       setTimeout(step, speed);
-    }
-  };
-
-  useEffect(() => {
-    if (isRunning) {
-      runningRef.current = true;
-      step();
-    } else {
-      runningRef.current = false;
-    }
-    return () => { runningRef.current = false; };
-  }, [isRunning, speed]);
-
-  // --- Render ---
-
-  const getTileColor = (val: number) => {
-    if (val === 0) return 'bg-slate-800';
-    if (val > 0) {
-      const intensity = Math.min(val / REWARD_GOAL, 1);
-      return `rgba(34, 197, 94, ${0.1 + intensity * 0.6})`;
-    } else {
-      const intensity = Math.min(Math.abs(val) / Math.abs(REWARD_HAZARD), 1);
-      return `rgba(239, 68, 68, ${0.1 + intensity * 0.6})`;
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 font-sans flex flex-col items-center p-6">
-      
-      {/* Header */}
-      <div className="max-w-4xl w-full flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
+    <!-- Header -->
+    <div class="max-w-5xl w-full flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
         <div>
-          <h1 className="text-3xl font-bold bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent flex items-center gap-2">
-            <Brain className="text-cyan-400" /> Robo-Dash: RL Lab
-          </h1>
-          <p className="text-slate-400 text-sm mt-1">
-            Episode: <span className="text-white font-mono">{episode}</span> | Steps: <span className="text-white font-mono">{steps}</span>
-          </p>
-        </div>
-
-        <div className="flex gap-2">
-           {episodeFinished || episode === 0 && steps === 0 ? (
-             <button 
-                onClick={startNextEpisode}
-                className="px-6 py-2 rounded-xl font-bold flex items-center gap-2 transition-all bg-blue-600 hover:bg-blue-500 text-white shadow-[0_0_15px_rgba(37,99,235,0.5)] animate-pulse"
-              >
-                <Play size={18}/> {episode === 0 && steps === 0 ? "Start First Run" : "Try Again"}
-             </button>
-           ) : (
-             <button 
-                onClick={() => setIsRunning(!isRunning)}
-                className={`px-6 py-2 rounded-xl font-bold flex items-center gap-2 transition-all ${isRunning ? 'bg-yellow-500 hover:bg-yellow-400 text-black' : 'bg-green-600 hover:bg-green-500 text-white'}`}
-              >
-                {isRunning ? <><Pause size={18}/> Pause</> : <><Play size={18}/> Resume</>}
-             </button>
-           )}
-
-          <button 
-            onClick={hardReset}
-            className="px-4 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 flex items-center gap-2"
-          >
-            <RotateCcw size={18}/> Reset
-          </button>
-        </div>
-      </div>
-
-      <div className="flex flex-col lg:flex-row gap-8 w-full max-w-5xl items-start">
-        
-        {/* The Grid World */}
-        <div className="flex-1 bg-slate-800/50 p-4 rounded-3xl border border-slate-700 shadow-2xl relative">
-          <div className="grid grid-cols-6 gap-2 aspect-square">
-            {INITIAL_GRID_LAYOUT.map((row, y) => (
-              row.map((type, x) => {
-                const isRobotHere = robotPos.x === x && robotPos.y === y;
-                const value = qValues[y][x];
-                
-                return (
-                  <div 
-                    key={`${x}-${y}`}
-                    className={`
-                      relative rounded-lg border border-slate-700/30 transition-all duration-300
-                      flex items-center justify-center text-2xl select-none 
-                      ${type === 'wall' ? 'bg-slate-700 shadow-inner' : ''}
-                    `}
-                    style={{
-                      backgroundColor: type === 'wall' ? undefined : getTileColor(value)
-                    }}
-                  >
-                    {/* Floor Value Number */}
-                    {type !== 'wall' && showValues && (
-                      <span className="absolute bottom-1 right-1 text-[10px] font-mono text-slate-400 opacity-70">
-                        {Math.round(value)}
-                      </span>
-                    )}
-
-                    {/* Static Items */}
-                    {type === 'goal' && <Zap className="text-yellow-400 drop-shadow-[0_0_8px_rgba(250,204,21,0.5)] animate-pulse" />}
-                    {type === 'hazard' && <Flame className="text-orange-500 drop-shadow-[0_0_5px_rgba(249,115,22,0.6)]" />}
-                    {type === 'start' && <div className="w-2 h-2 rounded-full bg-cyan-500/50"></div>}
-
-                    {/* The Robot */}
-                    {isRobotHere && (
-                      <div className="absolute inset-0 flex items-center justify-center z-10 transition-all duration-200">
-                        <div className={`text-4xl filter drop-shadow-lg transition-transform ${robotMood === 'happy' ? 'animate-bounce' : ''}`}>
-                          {robotMood === 'neutral' ? '🤖' : 
-                           robotMood === 'happy' ? '🤩' : 
-                           robotMood === 'eating' ? '🍪' :
-                           robotMood === 'dead' ? '💥' : '😵‍💫'}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            ))}
-          </div>
-        </div>
-
-        {/* Control Panel */}
-        <div className="w-full lg:w-80 flex flex-col gap-4">
-          
-          {/* Main Action: Cookie */}
-          <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
-            <h3 className="font-bold text-slate-200 mb-4 flex items-center gap-2">
-               Human Feedback (RLHF)
-            </h3>
-            <button 
-              onClick={giveCookie}
-              disabled={episodeFinished || (!isRunning && episode > 0)}
-              className="w-full py-6 bg-amber-600 hover:bg-amber-500 active:scale-95 disabled:opacity-50 disabled:active:scale-100 rounded-xl font-bold text-xl text-white shadow-lg transition-all flex flex-col items-center justify-center gap-2 border-b-4 border-amber-800"
-            >
-              <Cookie size={32} />
-              Give Cookie
-            </button>
-            <p className="text-xs text-slate-400 mt-3 text-center">
-              Click this when Robo is safe to increase the score of the current tile (+50).
+            <h1 class="text-3xl font-bold bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent flex items-center gap-2">
+                <i data-lucide="brain" class="text-cyan-400"></i> Robo-Dash: RL Lab
+            </h1>
+            <p class="text-slate-400 text-sm mt-1">
+                Episode: <span id="episode-display" class="text-white font-mono">0</span> | Steps: <span id="steps-display" class="text-white font-mono">0</span>
             </p>
-          </div>
+        </div>
 
-          {/* Settings */}
-          <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-            <h3 className="font-bold text-slate-200 mb-4">Settings</h3>
+        <div class="flex gap-2">
+            <button id="main-action-btn" class="px-6 py-2 rounded-xl font-bold flex items-center gap-2 transition-all bg-blue-600 hover:bg-blue-500 text-white shadow-[0_0_15px_rgba(37,99,235,0.5)]">
+                <i data-lucide="play" width="18"></i> <span id="main-btn-text">Start First Run</span>
+            </button>
+            <button id="reset-btn" class="px-4 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 flex items-center gap-2">
+                <i data-lucide="rotate-ccw" width="18"></i> Reset
+            </button>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex flex-col lg:flex-row gap-8 w-full max-w-5xl items-start">
+        
+        <!-- The Grid World -->
+        <div class="flex-1 bg-slate-800/50 p-4 rounded-3xl border border-slate-700 shadow-2xl relative w-full">
+            <!-- Grid Container -->
+            <div id="grid-container" class="grid grid-cols-6 gap-2 aspect-square">
+                <!-- Grid cells generated by JS -->
+            </div>
+        </div>
+
+        <!-- Control Panel -->
+        <div class="w-full lg:w-80 flex flex-col gap-4">
             
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs uppercase text-slate-500 font-bold tracking-wider mb-2 block">Simulation Speed</label>
-                <input 
-                  type="range" 
-                  min="10" 
-                  max="500" 
-                  step="10"
-                  value={510 - speed} 
-                  onChange={(e) => setSpeed(510 - parseInt(e.target.value))}
-                  className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                />
-              </div>
+            <!-- Cookie Action -->
+            <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
+                <h3 class="font-bold text-slate-200 mb-4 flex items-center gap-2">
+                   Human Feedback (RLHF)
+                </h3>
+                <button id="cookie-btn" class="w-full py-6 bg-amber-600 hover:bg-amber-500 active:scale-95 disabled:opacity-50 disabled:active:scale-100 rounded-xl font-bold text-xl text-white shadow-lg transition-all flex flex-col items-center justify-center gap-2 border-b-4 border-amber-800">
+                    <i data-lucide="cookie" width="32"></i>
+                    Give Cookie
+                </button>
+                <p class="text-xs text-slate-400 mt-3 text-center">
+                    Click when Robo is safe to reward the current tile (+50).
+                </p>
+            </div>
 
-              <div className="flex items-center gap-3 pt-2">
-                <input 
-                  type="checkbox" 
-                  id="showVals"
-                  checked={showValues}
-                  onChange={(e) => setShowValues(e.target.checked)}
-                  className="w-5 h-5 rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-offset-0 focus:ring-0"
-                />
-                <label htmlFor="showVals" className="text-sm text-slate-300 cursor-pointer select-none">Show Brain Numbers</label>
-              </div>
-            </div>
-          </div>
+            <!-- Settings -->
+            <div class="bg-slate-800 p-6 rounded-2xl border border-slate-700">
+                <h3 class="font-bold text-slate-200 mb-4">Settings</h3>
+                
+                <div class="space-y-4">
+                    <div>
+                        <label class="text-xs uppercase text-slate-500 font-bold tracking-wider mb-2 block">Simulation Speed</label>
+                        <input id="speed-slider" type="range" min="10" max="500" step="10" value="300" class="w-full">
+                        <div class="flex justify-between text-xs text-slate-500 mt-1">
+                            <span>Slow</span>
+                            <span>Hyper</span>
+                        </div>
+                    </div>
 
-          {/* Legend */}
-          <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 text-xs text-slate-400 space-y-2">
-            <div className="flex items-center gap-2">
-               <div className="w-3 h-3 bg-green-500/50 rounded"></div>
-               <span>High Value (Robot likes this)</span>
+                    <div class="flex items-center gap-3 pt-2">
+                        <input id="show-values-check" type="checkbox" checked class="w-5 h-5 rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-offset-0 focus:ring-0 cursor-pointer">
+                        <label for="show-values-check" class="text-sm text-slate-300 cursor-pointer select-none">Show Brain Numbers</label>
+                    </div>
+                </div>
             </div>
-            <div className="flex items-center gap-2">
-               <div className="w-3 h-3 bg-red-500/50 rounded"></div>
-               <span>Low Value (Robot hates this)</span>
+
+            <!-- Legend -->
+            <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 text-xs text-slate-400 space-y-2">
+                <div class="flex items-center gap-2">
+                   <div class="w-3 h-3 bg-green-500/50 rounded"></div>
+                   <span>High Value (Good)</span>
+                </div>
+                <div class="flex items-center gap-2">
+                   <div class="w-3 h-3 bg-red-500/50 rounded"></div>
+                   <span>Low Value (Bad)</span>
+                </div>
             </div>
-          </div>
 
         </div>
-      </div>
     </div>
-  );
-}
+
+    <script>
+        // --- Constants & Config ---
+        const GRID_SIZE = 6;
+        const REWARD_GOAL = 100;
+        const REWARD_HAZARD = -100;
+        const REWARD_STEP = -1;
+        const LEARNING_RATE = 0.5;
+        const DISCOUNT_FACTOR = 0.9;
+
+        // Layout: 'S'=Start, '.'=Empty, 'W'=Wall, 'H'=Hazard, 'G'=Goal
+        const LAYOUT_MAP = [
+            ['S', '.', '.', '.', '.', '.'],
+            ['.', 'W', 'W', 'H', '.', '.'],
+            ['.', '.', '.', '.', 'W', '.'],
+            ['H', 'W', '.', 'W', '.', '.'],
+            ['.', '.', '.', 'H', '.', 'G'],
+            ['.', '.', '.', '.', '.', '.'],
+        ];
+
+        // --- State ---
+        let state = {
+            robotPos: { x: 0, y: 0 },
+            qValues: [], // 2D array
+            isRunning: false,
+            episode: 0,
+            steps: 0,
+            robotMood: 'neutral', // neutral, happy, dead, confused, eating
+            showValues: true,
+            speed: 200,
+            episodeFinished: false
+        };
+        
+        // Loop handle
+        let gameLoopTimeout = null;
+
+        // --- Initialization ---
+
+        function initQValues() {
+            state.qValues = [];
+            for (let y = 0; y < GRID_SIZE; y++) {
+                let row = [];
+                for (let x = 0; x < GRID_SIZE; x++) {
+                    row.push(0);
+                }
+                state.qValues.push(row);
+            }
+        }
+
+        function initGame() {
+            initQValues();
+            createGridDOM();
+            updateUI();
+            lucide.createIcons();
+        }
+
+        // --- Logic ---
+
+        function getCellType(x, y) {
+            if (x < 0 || y < 0 || x >= GRID_SIZE || y >= GRID_SIZE) return 'W';
+            return LAYOUT_MAP[y][x];
+        }
+
+        function getBestMove(x, y) {
+            const moves = [
+                { dx: 0, dy: -1 }, // Up
+                { dx: 0, dy: 1 },  // Down
+                { dx: -1, dy: 0 }, // Left
+                { dx: 1, dy: 0 }   // Right
+            ];
+
+            // Epsilon Greedy: Explore less as episodes increase
+            const explorationRate = Math.max(0.1, 1.0 - (state.episode * 0.05));
+            
+            if (Math.random() < explorationRate) {
+                // Explore
+                return moves[Math.floor(Math.random() * moves.length)];
+            } else {
+                // Exploit
+                let bestMove = moves[0];
+                let maxVal = -Infinity;
+                
+                // Shuffle moves to avoid bias when values are equal (like 0)
+                const shuffledMoves = moves.sort(() => Math.random() - 0.5);
+
+                shuffledMoves.forEach(move => {
+                    const nx = x + move.dx;
+                    const ny = y + move.dy;
+                    // Check bounds and walls
+                    if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE && getCellType(nx, ny) !== 'W') {
+                        if (state.qValues[ny][nx] > maxVal) {
+                            maxVal = state.qValues[ny][nx];
+                            bestMove = move;
+                        }
+                    }
+                });
+                return bestMove;
+            }
+        }
+
+        function updateQValue(prevX, prevY, newX, newY, reward) {
+            const currentVal = state.qValues[prevY][prevX];
+            
+            // Future value is 0 if out of bounds (shouldn't happen with wall checks but safe to have)
+            let futureVal = 0;
+            if (newX >= 0 && newX < GRID_SIZE && newY >= 0 && newY < GRID_SIZE) {
+                futureVal = state.qValues[newY][newX];
+            }
+
+            // The Q-Learning Formula
+            const updatedVal = currentVal + LEARNING_RATE * (reward + (DISCOUNT_FACTOR * futureVal) - currentVal);
+            state.qValues[prevY][prevX] = parseFloat(updatedVal.toFixed(2));
+        }
+
+        function step() {
+            if (!state.isRunning) return;
+
+            const { x, y } = state.robotPos;
+            const move = getBestMove(x, y);
+            const nextX = x + move.dx;
+            const nextY = y + move.dy;
+
+            let reward = REWARD_STEP;
+            let hitWall = false;
+            let isGameOver = false;
+
+            const nextCell = getCellType(nextX, nextY);
+
+            if (nextCell === 'W') {
+                hitWall = true;
+                reward = -10;
+                setMood('confused');
+            } else if (nextCell === 'H') {
+                reward = REWARD_HAZARD;
+                setMood('dead');
+                isGameOver = true;
+            } else if (nextCell === 'G') {
+                reward = REWARD_GOAL;
+                setMood('happy');
+                isGameOver = true;
+            }
+
+            // Update Brain
+            // Even if we hit a wall, we learn that the step FROM current TO wall was bad/painful
+            const actualNextX = hitWall ? x : nextX;
+            const actualNextY = hitWall ? y : nextY;
+            updateQValue(x, y, actualNextX, actualNextY, reward);
+
+            // Move Physical Robot
+            if (!hitWall) {
+                state.robotPos = { x: nextX, y: nextY };
+            }
+
+            state.steps++;
+            updateUI(); // Re-render grid
+
+            if (isGameOver) {
+                state.episodeFinished = true;
+                state.isRunning = false;
+                updateButtons();
+                // Auto-reset handled by user clicking button now
+            } else {
+                gameLoopTimeout = setTimeout(step, 510 - state.speed);
+            }
+        }
+
+        function setMood(mood) {
+            state.robotMood = mood;
+            updateUI(); // To update robot emoji
+        }
+
+        // --- DOM & Rendering ---
+
+        function createGridDOM() {
+            const grid = document.getElementById('grid-container');
+            grid.innerHTML = ''; // Clear
+
+            for (let y = 0; y < GRID_SIZE; y++) {
+                for (let x = 0; x < GRID_SIZE; x++) {
+                    const cell = document.createElement('div');
+                    cell.id = `cell-${x}-${y}`;
+                    cell.className = `cell relative rounded-lg border border-slate-700/30 flex items-center justify-center text-2xl overflow-hidden`;
+                    
+                    // Static Elements based on map
+                    const type = LAYOUT_MAP[y][x];
+                    if (type === 'W') {
+                        cell.classList.add('bg-slate-700', 'shadow-inner');
+                    } else if (type === 'G') {
+                        cell.innerHTML = `<i data-lucide="zap" class="text-yellow-400 animate-pulse fill-yellow-400/20"></i>`;
+                    } else if (type === 'H') {
+                        cell.innerHTML = `<i data-lucide="flame" class="text-orange-500 fill-orange-500/20"></i>`;
+                    } else if (type === 'S') {
+                        // Mark start if needed, or just leave empty
+                        const dot = document.createElement('div');
+                        dot.className = "w-2 h-2 rounded-full bg-cyan-500/30 absolute bottom-2 left-2";
+                        cell.appendChild(dot);
+                    }
+
+                    // Value Display Span
+                    const valSpan = document.createElement('span');
+                    valSpan.id = `val-${x}-${y}`;
+                    valSpan.className = "absolute bottom-1 right-1 text-[10px] font-mono text-slate-400 opacity-70 pointer-events-none";
+                    cell.appendChild(valSpan);
+
+                    grid.appendChild(cell);
+                }
+            }
+        }
+
+        function updateUI() {
+            // Update Stats
+            document.getElementById('episode-display').innerText = state.episode;
+            document.getElementById('steps-display').innerText = state.steps;
+
+            // Update Grid Cells
+            for (let y = 0; y < GRID_SIZE; y++) {
+                for (let x = 0; x < GRID_SIZE; x++) {
+                    const type = LAYOUT_MAP[y][x];
+                    const val = state.qValues[y][x];
+                    const cell = document.getElementById(`cell-${x}-${y}`);
+                    const valSpan = document.getElementById(`val-${x}-${y}`);
+
+                    // Color based on Q-Value
+                    if (type !== 'W') {
+                        let bgStyle = 'rgba(30, 41, 59, 0.5)'; // Default slate-800ish
+                        if (val > 0) {
+                            const intensity = Math.min(val / REWARD_GOAL, 1);
+                            bgStyle = `rgba(34, 197, 94, ${0.1 + intensity * 0.6})`;
+                        } else if (val < 0) {
+                            const intensity = Math.min(Math.abs(val) / Math.abs(REWARD_HAZARD), 1);
+                            bgStyle = `rgba(239, 68, 68, ${0.1 + intensity * 0.6})`;
+                        }
+                        cell.style.backgroundColor = bgStyle;
+                    }
+
+                    // Number Display
+                    if (type !== 'W' && state.showValues) {
+                        valSpan.innerText = Math.round(val);
+                        valSpan.style.display = 'block';
+                    } else {
+                        valSpan.style.display = 'none';
+                    }
+
+                    // Remove old robot if exists
+                    const oldRobot = cell.querySelector('.robot-container');
+                    if (oldRobot) oldRobot.remove();
+                }
+            }
+
+            // Place Robot
+            const { x, y } = state.robotPos;
+            const robotCell = document.getElementById(`cell-${x}-${y}`);
+            if (robotCell) {
+                const robotDiv = document.createElement('div');
+                robotDiv.className = "robot-container absolute inset-0 flex items-center justify-center z-10 text-4xl drop-shadow-lg";
+                
+                // Emoji logic
+                let emoji = '🤖';
+                if (state.robotMood === 'happy') emoji = '🤩';
+                else if (state.robotMood === 'dead') emoji = '💥';
+                else if (state.robotMood === 'confused') emoji = '😵‍💫';
+                else if (state.robotMood === 'eating') emoji = '🍪';
+                
+                robotDiv.innerText = emoji;
+                if (state.robotMood === 'happy') robotDiv.classList.add('animate-bounce');
+                
+                robotCell.appendChild(robotDiv);
+            }
+            
+            // Re-init icons for dynamic content (though mostly static)
+            lucide.createIcons();
+            updateButtons();
+        }
+
+        function updateButtons() {
+            const mainBtn = document.getElementById('main-action-btn');
+            const mainBtnText = document.getElementById('main-btn-text');
+            const mainIcon = mainBtn.querySelector('i'); // Lucide replaces <i data-lucide> with <svg>
+
+            // Reset classes
+            mainBtn.className = "px-6 py-2 rounded-xl font-bold flex items-center gap-2 transition-all shadow-lg min-w-[160px] justify-center";
+
+            if (state.episodeFinished || (state.episode === 0 && state.steps === 0 && !state.isRunning)) {
+                // Try Again / Start Mode
+                mainBtn.classList.add('bg-blue-600', 'hover:bg-blue-500', 'text-white', 'animate-pulse');
+                mainBtnText.innerText = (state.episode === 0 && state.steps === 0) ? "Start First Run" : "Try Again";
+                // We need to re-render icon because lucide replaces the DOM node
+                mainBtn.innerHTML = `<i data-lucide="play" width="18"></i> <span id="main-btn-text">${mainBtnText.innerText}</span>`;
+            } else {
+                // Pause/Resume Mode
+                if (state.isRunning) {
+                    mainBtn.classList.add('bg-yellow-500', 'hover:bg-yellow-400', 'text-black');
+                    mainBtn.innerHTML = `<i data-lucide="pause" width="18"></i> <span id="main-btn-text">Pause</span>`;
+                } else {
+                    mainBtn.classList.add('bg-green-600', 'hover:bg-green-500', 'text-white');
+                    mainBtn.innerHTML = `<i data-lucide="play" width="18"></i> <span id="main-btn-text">Resume</span>`;
+                }
+            }
+            
+            // Cookie Button
+            const cookieBtn = document.getElementById('cookie-btn');
+            const canEat = !state.episodeFinished && (state.isRunning || state.steps > 0);
+            cookieBtn.disabled = !canEat;
+            
+            lucide.createIcons();
+        }
+
+        // --- Event Handlers ---
+
+        document.getElementById('main-action-btn').addEventListener('click', () => {
+            if (state.episodeFinished || (state.episode === 0 && state.steps === 0 && !state.isRunning)) {
+                // Start New Episode
+                state.robotPos = { x: 0, y: 0 };
+                state.steps = 0;
+                state.episode++;
+                state.robotMood = 'neutral';
+                state.episodeFinished = false;
+                state.isRunning = true;
+                step();
+            } else {
+                // Toggle Pause
+                state.isRunning = !state.isRunning;
+                if (state.isRunning) step();
+                else clearTimeout(gameLoopTimeout);
+                updateUI();
+            }
+        });
+
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            state.isRunning = false;
+            clearTimeout(gameLoopTimeout);
+            initQValues(); // Wipe brain
+            state.episode = 0;
+            state.steps = 0;
+            state.robotPos = { x: 0, y: 0 };
+            state.robotMood = 'neutral';
+            state.episodeFinished = false;
+            updateUI();
+        });
+
+        document.getElementById('cookie-btn').addEventListener('click', () => {
+            if (state.episodeFinished) return;
+            const { x, y } = state.robotPos;
+            
+            // Apply Manual Reward
+            state.qValues[y][x] += 50; 
+            
+            // Visual Feedback
+            setMood('eating');
+            setTimeout(() => setMood('neutral'), 800);
+            
+            // Force re-render immediately to show green tile
+            updateUI(); 
+        });
+
+        document.getElementById('speed-slider').addEventListener('input', (e) => {
+            state.speed = parseInt(e.target.value);
+        });
+
+        document.getElementById('show-values-check').addEventListener('change', (e) => {
+            state.showValues = e.target.checked;
+            updateUI();
+        });
+
+        // Start
+        initGame();
+
+    </script>
+</body>
+</html>
 
 
-                      
